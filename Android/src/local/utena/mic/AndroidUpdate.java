@@ -2,6 +2,7 @@ package local.utena.mic;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -248,10 +249,14 @@ final class AndroidUpdate {
             return;
         }
         Uri uri = Uri.parse("content://" + activity.getPackageName() + ".updates/" + ASSET);
-        Intent intent = new Intent(Intent.ACTION_VIEW);
+        Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
         intent.setDataAndType(uri, "application/vnd.android.package-archive");
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        activity.startActivity(intent);
+        try {
+            activity.startActivity(intent);
+        } catch (ActivityNotFoundException error) {
+            activity.startActivity(intent.setAction(Intent.ACTION_VIEW));
+        }
     }
 
     private void failed(String prefix, Exception error) {
