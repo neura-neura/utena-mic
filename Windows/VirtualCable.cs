@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 
 namespace UtenaMic;
@@ -7,10 +6,6 @@ internal sealed class VirtualCable : IDisposable
 {
     private const int SampleRate = 48000;
     private const int SamplesPerMs = SampleRate / 1000;
-    private const int StartSamples = 45 * SamplesPerMs;
-    private const int TargetSamples = 42 * SamplesPerMs;
-    private const int MaxSamples = 85 * SamplesPerMs;
-    private const int FadeSamples = 2 * SamplesPerMs;
     private const uint EventCallback = 0x00040000;
     private const uint AutoConvertPcm = 0x80000000;
     private const uint SrcDefaultQuality = 0x08000000;
@@ -23,14 +18,16 @@ internal sealed class VirtualCable : IDisposable
     private readonly AutoResetEvent ready = new(false);
     private readonly ManualResetEventSlim initialized = new(false);
     private readonly object sync = new();
-    private readonly short[] pending = new short[MaxSamples];
-    private int readIndex, available;
-    private long droppedSamples, underruns;
-    private double position, rate = 1;
-    private bool muted, started, rebuffering = true, discontinuity;
-    private short lastSample;
+    private readonly AdaptivePcmBuffer pending = new();
+    private bool started;
     private volatile bool stopping;
     private volatile IOException? failure;
+
+    [DllImport("avrt.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr AvSetMmThreadCharacteristics(string taskName, out uint taskIndex);
+
+    [DllImport("avrt.dll")]
+    private static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
 
     [StructLayout(LayoutKind.Sequential, Pack = 2)]
     private struct WaveFormat
@@ -95,13 +92,7 @@ internal sealed class VirtualCable : IDisposable
 
     internal void SetMuted(bool value)
     {
-        lock (sync)
-        {
-            muted = value;
-            if (!muted) return;
-            Array.Clear(pending);
-            lastSample = 0;
-        }
+        lock (sync) pending.SetMuted(value);
     }
 
     public void Enqueue(ReadOnlySpan<byte> pcm)
@@ -109,36 +100,16 @@ internal sealed class VirtualCable : IDisposable
         if (failure is { } error) throw error;
         lock (sync)
         {
-            int count = pcm.Length / 2;
-            if (available + count > pending.Length)
-            {
-                // A delayed TCP burst must not push live audio further behind.
-                int discard = available + count - pending.Length;
-                Advance(discard);
-                droppedSamples += discard;
-                discontinuity = true;
-            }
-            int writeIndex = (readIndex + available) % pending.Length;
-            for (int i = 0; i < count; i++)
-            {
-                pending[writeIndex] = muted ? (short)0 : BinaryPrimitives.ReadInt16LittleEndian(pcm.Slice(i * 2, 2));
-                writeIndex = (writeIndex + 1) % pending.Length;
-            }
-            available += count;
-            if (!started && available >= StartSamples) ready.Set();
+            pending.Enqueue(pcm);
+            if (!started && pending.CanStart) ready.Set();
         }
-    }
-
-    private void Advance(int samples)
-    {
-        readIndex = (readIndex + samples) % pending.Length;
-        available -= samples;
     }
 
     private void Render()
     {
         IAudioClient? audio = null;
         IAudioRenderClient? output = null;
+        IntPtr scheduler = IntPtr.Zero;
         try
         {
             audio = (IAudioClient)AudioDefaults.Activate(endpointId, typeof(IAudioClient).GUID);
@@ -161,7 +132,7 @@ internal sealed class VirtualCable : IDisposable
             {
                 lock (sync)
                 {
-                    if (available >= StartSamples)
+                    if (pending.CanStart)
                     {
                         started = true;
                         break;
@@ -174,6 +145,7 @@ internal sealed class VirtualCable : IDisposable
             // Keep room in the endpoint buffer without keeping extra audio queued.
             uint targetPadding = Math.Min(bufferFrames, TargetPadding);
             Write(output, stereo, targetPadding);
+            scheduler = AvSetMmThreadCharacteristics("Audio", out _);
             audio.Start();
             while (!stopping)
             {
@@ -190,6 +162,7 @@ internal sealed class VirtualCable : IDisposable
         finally
         {
             initialized.Set();
+            if (scheduler != IntPtr.Zero) AvRevertMmThreadCharacteristics(scheduler);
             if (audio != null && started)
                 try { audio.Stop(); } catch (COMException) { }
             if (output != null) Marshal.ReleaseComObject(output);
@@ -199,65 +172,10 @@ internal sealed class VirtualCable : IDisposable
 
     private void Write(IAudioRenderClient output, short[] stereo, uint frames)
     {
-        lock (sync) Fill(stereo, (int)frames);
+        lock (sync) pending.Fill(stereo.AsSpan(0, checked((int)frames * 2)));
         output.GetBuffer(frames, out var target);
         Marshal.Copy(stereo, 0, target, (int)frames * 2);
         output.ReleaseBuffer(frames, 0);
-    }
-
-    private void Fill(short[] stereo, int frames)
-    {
-        if (rebuffering)
-        {
-            if (available < StartSamples)
-            {
-                Array.Clear(stereo, 0, frames * 2);
-                return;
-            }
-            rebuffering = false;
-            discontinuity = true;
-            rate = 1;
-        }
-
-        // The Android capture clock and Windows playback clock can drift independently.
-        double desiredRate = 1 + Math.Clamp((available - TargetSamples) * 0.000004, -0.005, 0.005);
-        rate += (desiredRate - rate) * 0.01;
-        bool fadingIn = discontinuity;
-        if (fadingIn) position = 0;
-        discontinuity = false;
-        int rendered = Math.Min(frames, Math.Max(0, (int)Math.Floor((available - 1 - position) / rate)));
-        bool fadingOut = rendered < frames;
-        short previous = lastSample;
-        for (int i = 0; i < rendered; i++)
-        {
-            int offset = (int)position;
-            short left = pending[(readIndex + offset) % pending.Length];
-            short right = pending[(readIndex + offset + 1) % pending.Length];
-            double sample = left + (position - offset) * (right - left);
-            if (fadingIn && i < FadeSamples) sample = previous + (sample - previous) * i / FadeSamples;
-            if (fadingOut) sample *= Math.Min(1.0, (rendered - 1 - i) / (double)FadeSamples);
-            stereo[i * 2] = stereo[i * 2 + 1] = (short)sample;
-            position += rate;
-        }
-        if (fadingOut)
-        {
-            Array.Clear(stereo, rendered * 2, (frames - rendered) * 2);
-            // If the previous block ended at a nonzero value, fade it to silence.
-            if (rendered == 0)
-                for (int i = 0; i < Math.Min(FadeSamples, frames); i++)
-                    stereo[i * 2] = stereo[i * 2 + 1] = (short)(previous * (FadeSamples - 1 - i) / FadeSamples);
-            Advance(available);
-            position = 0;
-            rebuffering = true;
-            underruns++;
-        }
-        else
-        {
-            int consumed = (int)position;
-            Advance(consumed);
-            position -= consumed;
-        }
-        lastSample = stereo[frames * 2 - 1];
     }
 
     public void Dispose()
@@ -267,6 +185,6 @@ internal sealed class VirtualCable : IDisposable
         render.Join();
         initialized.Dispose();
         ready.Dispose();
-        trace($"Salida PCM: {underruns} interrupciones; {droppedSamples} muestras descartadas");
+        trace($"Salida PCM: {pending.Underruns} recargas; {pending.DroppedSamples} muestras descartadas; {pending.CompressedSamples} muestras de ajuste; reserva máxima {pending.PeakReserveMs} ms");
     }
 }

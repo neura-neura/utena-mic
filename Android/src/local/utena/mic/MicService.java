@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -26,6 +28,7 @@ public final class MicService extends Service {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final AtomicBoolean refresh = new AtomicBoolean(true);
     private final AtomicInteger muteRequests = new AtomicInteger();
+    private final AtomicInteger muteGeneration = new AtomicInteger();
     private final Set<Runnable> observers = new LinkedHashSet<>();
     private AudioManager audio;
     private NotificationManager notifications;
@@ -231,6 +234,7 @@ public final class MicService extends Service {
     private void stream(String host) {
         AudioRecord recorder = null;
         Thread controls = null;
+        Thread sender = null;
         int previousAudioMode = audio.getMode();
         boolean communication = false;
         String finalStatus = "En espera";
@@ -248,6 +252,7 @@ public final class MicService extends Service {
             int initialState = control.read();
             if (initialState < 0 || initialState > 1) throw new IOException("Respuesta de Windows no válida.");
             muted = initialState == 1;
+            muteGeneration.set(0);
             connection.setSoTimeout(0);
             String destination = ip.isLoopbackAddress() ? "Transmitiendo por túnel local" : "Transmitiendo a " + ip.getHostAddress();
             ui.post(() -> {
@@ -257,9 +262,16 @@ public final class MicService extends Service {
             });
             controls = new Thread(() -> receiveMute(connection, control), "UtenaMic-controls");
             controls.start();
+            // A blocked TCP write must not stop AudioRecord from collecting the next frame.
+            ArrayBlockingQueue<CapturedFrame> frames = new ArrayBlockingQueue<>(200);
+            sender = new Thread(() -> sendAudio(connection, wire, frames), "UtenaMic-send");
+            sender.start();
+            try { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO); }
+            catch (SecurityException ignored) { }
             byte[] pcm = new byte[FRAME * 2];
             int target = -1, reported = -2, tick = 0;
-            while (active) {
+            String sourceName = "";
+            while (active && !connection.isClosed()) {
                 if (recorder == null || refresh.getAndSet(false)) {
                     AudioDeviceInfo desired = preferredInput();
                     int next = desired == null ? -1 : desired.getId();
@@ -286,12 +298,11 @@ public final class MicService extends Service {
                 if (current != reported) {
                     String source = name(actual);
                     ui.post(() -> { route = "En uso: " + source; publish(); });
-                    byte[] text = source.getBytes(StandardCharsets.UTF_8);
-                    wire.writeByte(2);
-                    wire.writeShort(text.length);
-                    wire.write(text);
+                    sourceName = source;
                     reported = current;
                 }
+                int generation = muteGeneration.get();
+                boolean mutedBeforeRead = muted;
                 int read = recorder.read(pcm, 0, pcm.length, AudioRecord.READ_BLOCKING);
                 if (read < 0) {
                     if (refresh.get() || read == AudioRecord.ERROR_DEAD_OBJECT) {
@@ -303,17 +314,13 @@ public final class MicService extends Service {
                     throw new IOException("Android interrumpió la entrada de audio (" + read + ").");
                 }
                 if (read == 0) continue;
-                int toggles = muteRequests.getAndSet(0);
-                for (int i = 0; i < toggles; i++) {
-                    wire.writeByte(3);
-                    wire.writeShort(1);
-                    wire.writeByte(1);
+                if (mutedBeforeRead || muted || generation != muteGeneration.get())
+                    Arrays.fill(pcm, 0, read, (byte) 0);
+                CapturedFrame frame = new CapturedFrame(Arrays.copyOf(pcm, read), sourceName, generation);
+                if (!frames.offer(frame)) {
+                    frames.poll();
+                    frames.offer(frame);
                 }
-                if (muted) Arrays.fill(pcm, 0, read, (byte) 0);
-                wire.writeByte(1);
-                wire.writeShort(read);
-                wire.write(pcm, 0, read);
-                wire.flush();
                 if (++tick % 5 == 0) {
                     int peak = 0;
                     for (int i = 0; i + 1 < read; i += 2)
@@ -322,13 +329,12 @@ public final class MicService extends Service {
                     ui.post(() -> { this.level = muted ? 0 : level; publish(); });
                 }
             }
+            if (active && connection.isClosed()) throw new IOException("Se interrumpió la conexión con Windows.");
         } catch (Exception e) {
             if (active) finalStatus = e.getMessage() == null ? "Conexión interrumpida" : e.getMessage();
         } finally {
-            if (controls != null) {
-                try { controls.join(); }
-                catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-            }
+            join(controls);
+            join(sender);
             if (recorder != null) recorder.release();
             if (communication && sdk() >= 31) {
                 clearBluetooth();
@@ -351,11 +357,65 @@ public final class MicService extends Service {
         }
     }
 
+    private static void join(Thread thread) {
+        if (thread == null) return;
+        try { thread.join(); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+    }
+
+    private static final class CapturedFrame {
+        final byte[] pcm;
+        final String source;
+        final int generation;
+
+        CapturedFrame(byte[] pcm, String source, int generation) {
+            this.pcm = pcm;
+            this.source = source;
+            this.generation = generation;
+        }
+    }
+
+    private void sendAudio(Socket connection, DataOutputStream wire, ArrayBlockingQueue<CapturedFrame> frames) {
+        byte[] silence = new byte[FRAME * 2];
+        String reported = "";
+        try {
+            while (active && !connection.isClosed()) {
+                int toggles = muteRequests.getAndSet(0);
+                for (int i = 0; i < toggles; i++) {
+                    wire.writeByte(3);
+                    wire.writeShort(1);
+                    wire.writeByte(1);
+                }
+                if (toggles > 0) wire.flush();
+                CapturedFrame frame = frames.poll(20, TimeUnit.MILLISECONDS);
+                if (frame == null) continue;
+                if (!reported.equals(frame.source)) {
+                    byte[] text = frame.source.getBytes(StandardCharsets.UTF_8);
+                    wire.writeByte(2);
+                    wire.writeShort(text.length);
+                    wire.write(text);
+                    reported = frame.source;
+                }
+                byte[] data = muted || frame.generation != muteGeneration.get() ? silence : frame.pcm;
+                wire.writeByte(1);
+                wire.writeShort(frame.pcm.length);
+                wire.write(data, 0, frame.pcm.length);
+                wire.flush();
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        } catch (IOException ignored) {
+        } finally {
+            try { connection.close(); } catch (IOException ignored) { }
+        }
+    }
+
     private void receiveMute(Socket connection, InputStream control) {
         try {
             int state;
             while ((state = control.read()) >= 0) {
                 if (state > 1) break;
+                if (state == 1 && !muted) muteGeneration.incrementAndGet();
                 muted = state == 1;
                 ui.post(() -> {
                     if (socket == connection && connected) {

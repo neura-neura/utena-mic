@@ -20,7 +20,10 @@ If automatic discovery fails, enter the IP next to the PC's Wi-Fi or Ethernet ad
 ## Mute and update
 
 - **Mute.** Press **Silenciar** (Mute) on either device. Both apps show the same state. Start the session from the Android app, then use its notification to mute, unmute, or disconnect while another app is open. The notification actions also work from the lock screen when Android allows them there. Allow notifications when prompted.
-- **Update Windows.** Press the circular arrow in the title bar. When a newer release is available, confirm to download and start its installer. The app verifies the download against GitHub's SHA-256 digest. Install version 0.3.0 on both devices to use synchronized mute.
+- **Update Windows.** Press the circular arrow in the title bar and confirm to download and start the installer.
+- **Update Android.** Tap **Actualizar app** (Update app) and confirm the download. On first use, Android asks you to allow installations from Utena Mic. Return to the app to confirm the system installer. The app verifies the APK against GitHub's SHA-256 digest and the installed signing certificate.
+
+The receiver adjusts its playback buffer when packets arrive late. It keeps their audio in order and gradually reduces the extra delay once the connection settles. A pause longer than the available audio can still cause a brief interruption while the buffer refills.
 
 ## Build from source
 

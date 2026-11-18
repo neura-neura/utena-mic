@@ -128,7 +128,7 @@ Section "Utena Mic"
     CreateDirectory "$SMPROGRAMS\Utena Mic"
     CreateShortcut "$SMPROGRAMS\Utena Mic\Utena Mic.lnk" "$INSTDIR\UtenaMic.exe"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "Utena Mic"
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "0.3.0"
+    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "0.3.1"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 

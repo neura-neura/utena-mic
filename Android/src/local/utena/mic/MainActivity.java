@@ -9,6 +9,7 @@ import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.*;
 
@@ -19,6 +20,7 @@ public final class MainActivity extends Activity {
     private ProgressBar meter;
     private MicService service;
     private boolean bound, bluetoothRequested, notificationsRequested;
+    private AndroidUpdate updater;
     private final Runnable refreshUI = this::showServiceState;
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -48,7 +50,16 @@ public final class MainActivity extends Activity {
         ImageView logo = new ImageView(this);
         logo.setImageResource(R.drawable.app_icon);
         int iconSize = Math.round(56 * getResources().getDisplayMetrics().density);
-        box.addView(logo, new LinearLayout.LayoutParams(iconSize, iconSize));
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(logo, new LinearLayout.LayoutParams(iconSize, iconSize));
+        header.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1));
+        Button update = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        update.setText("Actualizar app");
+        header.addView(update);
+        updater = new AndroidUpdate(this, update);
+        update.setOnClickListener(view -> updater.check());
+        box.addView(header);
         TextView title = label("Utena Mic", 22);
         title.setTextColor(Color.WHITE);
         title.setBackgroundColor(Color.rgb(142, 35, 81));
@@ -145,5 +156,10 @@ public final class MainActivity extends Activity {
         } else if (request == 4 || request == 5 || request == 6) {
             requestStart();
         }
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request == AndroidUpdate.INSTALL_PERMISSION) updater.resumeInstall();
     }
 }
