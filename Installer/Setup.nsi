@@ -4,6 +4,7 @@ Unicode True
 !include "WinVer.nsh"
 
 Name "Utena Mic"
+Icon "..\assets\logo.ico"
 OutFile "${OUTPUT}"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
@@ -35,6 +36,18 @@ Section "Utena Mic"
     SetShellVarContext all
     SetRegView 64
     SetOutPath "$INSTDIR"
+    StrCpy $1 0
+    ${Do}
+        FindWindow $0 "" "Utena Mic"
+        ${If} $0 == 0
+            ${ExitDo}
+        ${EndIf}
+        Sleep 200
+        IntOp $1 $1 + 1
+        ${If} $1 >= 25
+            Abort "Close Utena Mic and run the installer again."
+        ${EndIf}
+    ${Loop}
     ${If} ${IsNativeARM64}
         File /r "${PAYLOAD}\win-arm64\*"
     ${Else}
@@ -102,9 +115,9 @@ Section "Utena Mic"
     Pop $0
     nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${UDP_RULE}" program="$INSTDIR\UtenaMic.exe"'
     Pop $0
-    nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${TCP_RULE}" dir=in action=allow program="$INSTDIR\UtenaMic.exe" protocol=TCP localport=48395 remoteip=LocalSubnet profile=private'
+    nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${TCP_RULE}" dir=in action=allow program="$INSTDIR\UtenaMic.exe" protocol=TCP localport=48395 remoteip=LocalSubnet profile=any'
     Pop $1
-    nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${UDP_RULE}" dir=in action=allow program="$INSTDIR\UtenaMic.exe" protocol=UDP localport=48395 remoteip=LocalSubnet profile=private'
+    nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${UDP_RULE}" dir=in action=allow program="$INSTDIR\UtenaMic.exe" protocol=UDP localport=48395 remoteip=LocalSubnet profile=any'
     Pop $2
     ${If} $1 != 0
     ${OrIf} $2 != 0
@@ -115,7 +128,7 @@ Section "Utena Mic"
     CreateDirectory "$SMPROGRAMS\Utena Mic"
     CreateShortcut "$SMPROGRAMS\Utena Mic\Utena Mic.lnk" "$INSTDIR\UtenaMic.exe"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "Utena Mic"
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "0.2.0"
+    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "0.3.0"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd
 

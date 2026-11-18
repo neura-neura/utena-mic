@@ -256,11 +256,17 @@ internal sealed class ReceiverForm : Form
 {
     private const int Port = 48395;
     private const string Discovery = "UTENA_MIC_V2";
+    private const string MuteProtocol = "UTENA_MIC_V3";
     private readonly Button connect = new() { Text = "Conectar", Dock = DockStyle.Top, Height = 70, FlatStyle = FlatStyle.System };
     private readonly Label status = new() { Text = "En espera", Dock = DockStyle.Top, Height = 47 };
     private readonly Label route = new() { Text = "Entrada Android: —", Dock = DockStyle.Top, Height = 30 };
     private readonly Label stats = new() { Dock = DockStyle.Top, Height = 31 };
     private readonly ProgressBar meter = new() { Dock = DockStyle.Top, Height = 18, Maximum = 100, Style = ProgressBarStyle.Continuous };
+    private readonly Button mute = new() { Text = "Silenciar", Dock = DockStyle.Top, Height = 38, Enabled = false };
+    private readonly CaptionButton update = new("↻", "Buscar actualización");
+    private readonly ToolTip tips = new();
+    private readonly CancellationTokenSource lifetime = new();
+    private volatile MuteSession? peerMute;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 150 };
     private CancellationTokenSource? stop;
     private long received;
@@ -276,16 +282,17 @@ internal sealed class ReceiverForm : Form
     public ReceiverForm()
     {
         Text = "Utena Mic";
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         BackColor = Color.FromArgb(216, 208, 211);
         Font = new Font("Tahoma", 10);
-        MinimumSize = new Size(420, 290);
-        ClientSize = new Size(495, 267);
+        MinimumSize = new Size(420, 340);
+        ClientSize = new Size(495, 319);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.None;
         var title = new Panel { Dock = DockStyle.Top, Height = 23, BackColor = Color.FromArgb(142, 35, 81) };
         var caption = new Label { Text = "Utena Mic · receptor", Dock = DockStyle.Fill, Padding = new Padding(5, 0, 0, 0),
             Font = new Font("Tahoma", 9, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.White };
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 67, WrapContents = false, Padding = new Padding(1, 2, 1, 0) };
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 88, WrapContents = false, Padding = new Padding(1, 2, 1, 0) };
         var minimize = new CaptionButton("_", "Minimizar");
         var maximize = new CaptionButton("□", "Maximizar");
         var close = new CaptionButton("×", "Cerrar");
@@ -295,21 +302,89 @@ internal sealed class ReceiverForm : Form
         Resize += (_, _) => maximize.Text = WindowState == FormWindowState.Maximized ? "▣" : "□";
         caption.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left && e.Clicks == 1) { ReleaseCapture(); SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero); } };
         caption.DoubleClick += (_, _) => ToggleMaximized();
-        buttons.Controls.AddRange(new Control[] { minimize, maximize, close });
+        buttons.Controls.AddRange(new Control[] { update, minimize, maximize, close });
+        tips.SetToolTip(update, "Buscar actualización");
         title.Controls.Add(caption);
         title.Controls.Add(buttons);
+        if (Icon != null)
+        {
+            var emblem = new PictureBox { Dock = DockStyle.Left, Width = 24,
+                Image = Icon.ToBitmap(), SizeMode = PictureBoxSizeMode.Zoom };
+            title.Controls.Add(emblem);
+        }
         var body = new Panel { Dock = DockStyle.Fill, Padding = new Padding(9, 7, 9, 9) };
-        body.Controls.AddRange(new Control[] { meter, stats, route, status, connect });
+        body.Controls.AddRange(new Control[] { meter, stats, route, status, mute, connect });
         var frame = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, Padding = new Padding(1) };
         frame.Controls.Add(body);
         frame.Controls.Add(title);
         Controls.Add(frame);
         connect.Font = new Font("Tahoma", 16, FontStyle.Bold);
         connect.Click += async (_, _) => { if (stop is { } current) current.Cancel(); else await Listen(); };
-        FormClosing += (_, _) => stop?.Cancel();
-        timer.Tick += (_, _) => { meter.Value = Volatile.Read(ref level); stats.Text = $"PCM 48 kHz · {Interlocked.Read(ref received) / 1024:N0} KiB recibidos"; };
+        mute.Click += (_, _) => { peerMute?.Toggle(); RefreshMute(); };
+        update.Click += async (_, _) => await UpdateApp();
+        FormClosing += (_, _) => { stop?.Cancel(); lifetime.Cancel(); };
+        timer.Tick += (_, _) =>
+        {
+            RefreshMute();
+            meter.Value = peerMute?.Muted == true ? 0 : Volatile.Read(ref level);
+            stats.Text = $"PCM 48 kHz · {Interlocked.Read(ref received) / 1024:N0} KiB recibidos";
+        };
         timer.Start();
         if (!string.IsNullOrWhiteSpace(validationPath)) Shown += async (_, _) => await Listen();
+    }
+
+    private void RefreshMute()
+    {
+        var peer = peerMute;
+        mute.Enabled = peer != null;
+        mute.Text = peer?.Muted == true ? "Silenciado · Activar" : "Silenciar";
+    }
+
+    private async Task UpdateApp()
+    {
+        update.Enabled = false;
+        string? installer = null;
+        try
+        {
+            var release = await GitHubUpdate.Check(lifetime.Token);
+            if (release == null)
+            {
+                MessageBox.Show(this, "Ya tienes la última versión.", Text);
+                return;
+            }
+            if (MessageBox.Show(this, $"¿Instalar Utena Mic {release.Tag} desde GitHub?", Text,
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+            update.Text = "…";
+            tips.SetToolTip(update, "Descargando actualización");
+            using var download = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            download.CancelAfter(TimeSpan.FromMinutes(10));
+            installer = await GitHubUpdate.Download(release, download.Token);
+            Process.Start(new ProcessStartInfo(installer) { UseShellExecute = true });
+            installer = null;
+            Close();
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception error) when (error is IOException or System.Net.Http.HttpRequestException or
+            System.Text.Json.JsonException or FormatException or System.ComponentModel.Win32Exception or
+            InvalidOperationException or KeyNotFoundException or OperationCanceledException)
+        {
+            MessageBox.Show(this, $"No se pudo completar la actualización.\n{error.Message}", Text);
+        }
+        finally
+        {
+            if (installer != null)
+            {
+                try { File.Delete(installer); Directory.Delete(Path.GetDirectoryName(installer)!); }
+                catch (IOException) { }
+            }
+            if (!IsDisposed)
+            {
+                update.Text = "↻";
+                tips.SetToolTip(update, "Buscar actualización");
+                update.Enabled = true;
+            }
+        }
     }
 
     private void ToggleMaximized() => WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
@@ -331,14 +406,21 @@ internal sealed class ReceiverForm : Form
         {
             tcp = new TcpListener(IPAddress.Any, Port);
             tcp.Start(2);
-            discoveryTask = Discover(session.Token);
             var addresses = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(i => i.OperationalStatus == OperationalStatus.Up && i.NetworkInterfaceType != NetworkInterfaceType.Loopback)
-                .SelectMany(i => i.GetIPProperties().UnicastAddresses)
-                .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a.Address))
-                .Select(a => a.Address.ToString());
+                .Where(i => i.OperationalStatus == OperationalStatus.Up &&
+                    i.NetworkInterfaceType is not (NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel))
+                .OrderByDescending(i => i.GetIPProperties().GatewayAddresses.Count > 0)
+                .SelectMany(i => i.GetIPProperties().UnicastAddresses
+                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a.Address))
+                    .Select(a => $"{a.Address} ({i.Name})"));
             var waiting = $"Buscando teléfono en la red local\nIP: {string.Join(", ", addresses)}";
             status.Text = waiting;
+            var discoveryError = new Progress<string>(message =>
+            {
+                waiting = message + "\n" + waiting;
+                if (status.Text.StartsWith("Buscando")) status.Text = waiting;
+            });
+            discoveryTask = Discover(discoveryError, session.Token);
             Trace("Listening " + Port);
             while (!session.IsCancellationRequested)
             {
@@ -370,7 +452,7 @@ internal sealed class ReceiverForm : Form
         }
     }
 
-    private static async Task Discover(CancellationToken token)
+    private static async Task Discover(IProgress<string> warning, CancellationToken token)
     {
         try
         {
@@ -383,7 +465,7 @@ internal sealed class ReceiverForm : Form
                     await udp.SendAsync(reply, query.RemoteEndPoint, token);
             }
         }
-        catch (SocketException e) { Debug.WriteLine(e.Message); }
+        catch (SocketException e) { warning.Report($"Detección automática no disponible ({e.SocketErrorCode}). Usa la IP."); }
     }
 
     private async Task Receive(TcpClient phone, IProgress<string> cableStatus, IProgress<string> inputRoute,
@@ -398,39 +480,64 @@ internal sealed class ReceiverForm : Form
         string expected = $"{Discovery}\n";
         var auth = new byte[expected.Length];
         await stream.ReadExactlyAsync(auth, deadline.Token);
-        if (!auth.AsSpan().SequenceEqual(Encoding.ASCII.GetBytes(expected))) return;
+        string greeting = Encoding.ASCII.GetString(auth);
+        bool supportsMute = greeting == MuteProtocol + "\n";
+        if (greeting != expected && !supportsMute) return;
         using var speaker = VirtualCable.TryOpen(Trace, out string cableReport);
         // The sender begins capturing as soon as it receives the acknowledgment.
-        await stream.WriteAsync(new byte[] { (byte)'Y' }, deadline.Token);
+        byte[] acknowledgment = supportsMute ? [(byte)'Y', (byte)0] : [(byte)'Y'];
+        await stream.WriteAsync(acknowledgment, deadline.Token);
         deadline.CancelAfter(Timeout.InfiniteTimeSpan);
         Trace("Connected " + peer);
         cableStatus.Report(cableReport);
         Trace(cableReport);
         byte[] header = new byte[3], buffer = new byte[1920];
         using var idle = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
-        while (!stopToken.IsCancellationRequested)
+        using var controlStop = CancellationTokenSource.CreateLinkedTokenSource(stopToken);
+        var control = supportsMute ? new MuteSession(speaker) : null;
+        peerMute = control;
+        Task? outgoing = control?.Send(stream, controlStop.Token);
+        try
         {
-            idle.CancelAfter(TimeSpan.FromSeconds(8));
-            await stream.ReadExactlyAsync(header, idle.Token);
-            int length = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(1));
-            if (length is <= 0 or > 1920) throw new IOException("Longitud de paquete inválida.");
-            await stream.ReadExactlyAsync(buffer.AsMemory(0, length), idle.Token);
-            if (header[0] == 2)
+            while (!stopToken.IsCancellationRequested)
             {
-                if (length > 256) throw new IOException("Nombre de entrada inválido.");
-                string source = "Entrada Android: " + Encoding.UTF8.GetString(buffer, 0, length);
-                inputRoute.Report(source);
-                Trace(source);
-                continue;
+                idle.CancelAfter(TimeSpan.FromSeconds(8));
+                await stream.ReadExactlyAsync(header, idle.Token);
+                int length = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(1));
+                if (length is <= 0 or > 1920) throw new IOException("Longitud de paquete inválida.");
+                await stream.ReadExactlyAsync(buffer.AsMemory(0, length), idle.Token);
+                if (header[0] == 2)
+                {
+                    if (length > 256) throw new IOException("Nombre de entrada inválido.");
+                    string source = "Entrada Android: " + Encoding.UTF8.GetString(buffer, 0, length);
+                    inputRoute.Report(source);
+                    Trace(source);
+                    continue;
+                }
+                if (header[0] == 3 && control != null && length == 1 && buffer[0] == 1)
+                {
+                    control.Toggle();
+                    continue;
+                }
+                if (header[0] != 1 || length % 2 != 0) throw new IOException("Paquete PCM inválido.");
+                long total = Interlocked.Add(ref received, length);
+                if (total / 96000 != (total - length) / 96000) Trace($"PCM bytes={total}");
+                int peak = 0;
+                for (int i = 0; i < length; i += 2)
+                    peak = Math.Max(peak, Math.Abs((int)BinaryPrimitives.ReadInt16LittleEndian(buffer.AsSpan(i, 2))));
+                Volatile.Write(ref level, Math.Min(100, (int)(Math.Sqrt(peak / 32768.0) * 100)));
+                speaker?.Enqueue(buffer.AsSpan(0, length));
             }
-            if (header[0] != 1 || length % 2 != 0) throw new IOException("Paquete PCM inválido.");
-            long total = Interlocked.Add(ref received, length);
-            if (total / 96000 != (total - length) / 96000) Trace($"PCM bytes={total}");
-            int peak = 0;
-            for (int i = 0; i < length; i += 2)
-                peak = Math.Max(peak, Math.Abs((int)BinaryPrimitives.ReadInt16LittleEndian(buffer.AsSpan(i, 2))));
-            Volatile.Write(ref level, Math.Min(100, (int)(Math.Sqrt(peak / 32768.0) * 100)));
-            speaker?.Enqueue(buffer.AsSpan(0, length));
+        }
+        finally
+        {
+            peerMute = null;
+            controlStop.Cancel();
+            if (outgoing != null)
+            {
+                try { await outgoing; }
+                catch (Exception error) when (error is OperationCanceledException or IOException) { }
+            }
         }
     }
 

@@ -10,12 +10,17 @@ Utena Mic turns your Android phone into a Windows microphone over your local net
 
 1. Open the [latest release](https://github.com/neura-neura/utena-mic/releases/latest). On Windows, run **UtenaMic-VAC-Setup.exe** and approve the administrator prompt. If the bundled Virtual Audio Cable Lite setup opens, accept its license and finish installing the driver. The Windows installer also includes the .NET runtime.
 2. On Android, open **UtenaMic.apk** and install it. Android may ask you to allow installations from the app that opened the APK. Grant microphone access when Utena Mic asks.
-3. Put both devices on the same local network and set that network to **Private** in Windows. Open **Utena Mic** on both devices and tap **Conectar** (Connect) on Windows first, then on Android. Leave the IP field blank for automatic discovery.
+3. Put both devices on the same local network. Open **Utena Mic** on both devices and press **Conectar** (Connect) on Windows first, then on Android. Leave the IP field blank for automatic discovery.
 4. In the Windows app where you want to use the microphone, choose **Utena Mic (Virtual Audio Cable)** as its input. If Windows kept the driver's original name during setup, choose **Line 1 (Virtual Audio Cable)**.
 
 The Windows installer supports x64 and Arm64 PCs running Windows 10 version 22H2 or Windows 11. The Android app requires Android 8.0 or later. VAC Lite is licensed for private, non-commercial home use. Setup includes the original VAC Lite 4.71 archive. [VAC Lite license and distribution terms](https://vac.muzychenko.net/en/manual/distrib.htm)
 
-If automatic discovery fails, enter the IP shown in the Windows app. Keep Utena Mic open on Android while transmitting. Audio travels unencrypted over the local network. Use a network you trust.
+If automatic discovery fails, enter the IP next to the PC's Wi-Fi or Ethernet adapter in the Windows app. Setup allows TCP and UDP port 48395 for Utena Mic from the local subnet. Guest networks, Wi-Fi client isolation, or managed firewall rules can still block device-to-device connections. Audio travels unencrypted over the local network. Use a network you trust.
+
+## Mute and update
+
+- **Mute.** Press **Silenciar** (Mute) on either device. Both apps show the same state. Start the session from the Android app, then use its notification to mute, unmute, or disconnect while another app is open. The notification actions also work from the lock screen when Android allows them there. Allow notifications when prompted.
+- **Update Windows.** Press the circular arrow in the title bar. When a newer release is available, confirm to download and start its installer. The app verifies the download against GitHub's SHA-256 digest. Install version 0.3.0 on both devices to use synchronized mute.
 
 ## Build from source
 

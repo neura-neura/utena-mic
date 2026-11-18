@@ -13,11 +13,13 @@ $tools = Join-Path $sdk "build-tools/$BuildTools"
 $build = Join-Path $PSScriptRoot 'build'
 $out = (New-Item -ItemType Directory -Force $OutDir).FullName
 
-New-Item -ItemType Directory -Force "$build/classes","$build/dex" | Out-Null
-& "$tools/aapt2.exe" link -I $platformJar --manifest "$PSScriptRoot/AndroidManifest.xml" -o "$build/unsigned.apk"
+New-Item -ItemType Directory -Force "$build/classes","$build/dex","$build/generated" | Out-Null
+& "$tools/aapt2.exe" compile --dir "$PSScriptRoot/res" -o "$build/resources.zip"
+if ($LASTEXITCODE -ne 0) { throw 'Resource compilation failed.' }
+& "$tools/aapt2.exe" link -I $platformJar --manifest "$PSScriptRoot/AndroidManifest.xml" --java "$build/generated" -o "$build/unsigned.apk" "$build/resources.zip"
 if ($LASTEXITCODE -ne 0) { throw 'Manifest compilation failed.' }
 
-$source = @(Get-ChildItem "$PSScriptRoot/src" -Filter '*.java' -Recurse | ForEach-Object FullName)
+$source = @(Get-ChildItem "$PSScriptRoot/src","$build/generated" -Filter '*.java' -Recurse | ForEach-Object FullName)
 javac --release 8 -encoding UTF-8 -cp $platformJar -d "$build/classes" @source
 if ($LASTEXITCODE -ne 0) { throw 'Java compilation failed.' }
 

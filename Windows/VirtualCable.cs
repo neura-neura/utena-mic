@@ -27,7 +27,7 @@ internal sealed class VirtualCable : IDisposable
     private int readIndex, available;
     private long droppedSamples, underruns;
     private double position, rate = 1;
-    private bool started, rebuffering = true, discontinuity;
+    private bool muted, started, rebuffering = true, discontinuity;
     private short lastSample;
     private volatile bool stopping;
     private volatile IOException? failure;
@@ -93,6 +93,17 @@ internal sealed class VirtualCable : IDisposable
         return cable;
     }
 
+    internal void SetMuted(bool value)
+    {
+        lock (sync)
+        {
+            muted = value;
+            if (!muted) return;
+            Array.Clear(pending);
+            lastSample = 0;
+        }
+    }
+
     public void Enqueue(ReadOnlySpan<byte> pcm)
     {
         if (failure is { } error) throw error;
@@ -110,7 +121,7 @@ internal sealed class VirtualCable : IDisposable
             int writeIndex = (readIndex + available) % pending.Length;
             for (int i = 0; i < count; i++)
             {
-                pending[writeIndex] = BinaryPrimitives.ReadInt16LittleEndian(pcm.Slice(i * 2, 2));
+                pending[writeIndex] = muted ? (short)0 : BinaryPrimitives.ReadInt16LittleEndian(pcm.Slice(i * 2, 2));
                 writeIndex = (writeIndex + 1) % pending.Length;
             }
             available += count;
