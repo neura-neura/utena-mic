@@ -1,0 +1,9 @@
+/Android/build/
+/Windows/bin/
+/Windows/obj/
+/Windows/publish/
+/dist/
+/GOAL.md
+*.pfx
+*.jks
+*.keystore
